@@ -1,0 +1,37 @@
+# Linkwarden: save and archive web pages so they survive the site going away. From the official compose.
+name: homelab-linkwarden
+services:
+  linkwarden:
+    image: ghcr.io/linkwarden/linkwarden:latest
+    restart: "no"   # only runs when started with `homelab start`
+    ports: ["3000:3000"]
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?}@postgres:5432/postgres
+      NEXTAUTH_URL: http://${HOST_IP:?}:3000/api/v1/auth
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?}
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?}
+    volumes:
+      - ${DATA:?}/linkwarden/data:/data/data
+    depends_on:   # wait for the database to be ready, not just started
+      postgres: {condition: service_healthy}
+      meilisearch: {condition: service_started}
+  postgres:
+    image: postgres:16-alpine
+    restart: "no"   # only runs when started with `homelab start`
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes:
+      - ${DATA:?}/linkwarden/db:/var/lib/postgresql/data
+    healthcheck:   # app waits for this, so a slow crash-recovery start can't kill it
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+  meilisearch:
+    image: getmeili/meilisearch:v1.13.3
+    restart: "no"   # only runs when started with `homelab start`
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?}
+    volumes:
+      - ${DATA:?}/linkwarden/meili:/meili_data

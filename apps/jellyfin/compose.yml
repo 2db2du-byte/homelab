@@ -1,0 +1,19 @@
+# Jellyfin: your own Netflix for the family videos. Videos are READ-ONLY (approved 2026-10-05);
+# Jellyfin's own settings and cache live on the 4TB Seagate.
+name: homelab-jellyfin
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    user: "1000:1000"
+    group_add: ["${RENDER_GID}"]          # use the laptop's graphics chip to convert video for phones
+    devices: ["/dev/dri:/dev/dri"]
+    ports: ["8096:8096"]
+    environment:
+      TZ: ${TZ}
+      JELLYFIN_PublishedServerUrl: http://${HOST_IP:?}:8096
+    volumes:
+      - /run/media/${USER}/OmarchyExt1/apps/jellyfin/config:/config
+      - /run/media/${USER}/OmarchyExt1/apps/jellyfin/cache:/cache
+      - ${HOME_DIR}/Videos:/media/videos:ro
+    restart: "no"   # only runs when started with `homelab start`

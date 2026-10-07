@@ -1,0 +1,10 @@
+# Actual Budget: envelope budgeting; your money data stays home.
+# Browsers only allow it over HTTPS or on this laptop itself (http://localhost:5006).
+name: homelab-actual
+services:
+  actual:
+    image: docker.io/actualbudget/actual-server:latest
+    restart: "no"   # only runs when started with `homelab start`
+    ports: ["5006:5006"]
+    volumes:
+      - ${DATA:?}/actual:/data

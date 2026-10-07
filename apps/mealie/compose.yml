@@ -1,0 +1,13 @@
+# Mealie: family recipes, meal planning and shopping lists.
+name: homelab-mealie
+services:
+  mealie:
+    image: ghcr.io/mealie-recipes/mealie:latest
+    restart: "no"   # only runs when started with `homelab start`
+    ports: ["9000:9000"]
+    environment:
+      BASE_URL: http://${HOST_IP:?}:9000
+      ALLOW_SIGNUP: "false"
+      TZ: ${TZ}
+    volumes:
+      - ${DATA:?}/mealie:/app/data

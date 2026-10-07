@@ -1,0 +1,41 @@
+# Nextcloud: your own Google Drive / Dropbox (files, calendar, contacts).
+name: homelab-nextcloud
+services:
+  app:
+    image: nextcloud:32-apache
+    restart: "no"   # only runs when started with `homelab start`
+    ports: ["8080:80"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
+      REDIS_HOST: redis
+      NEXTCLOUD_ADMIN_USER: ${ADMIN_USER:?}
+      NEXTCLOUD_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?}
+      NEXTCLOUD_TRUSTED_DOMAINS: localhost ${HOST_IP:?} ${HOSTNAME:?} ${HOSTNAME}.local
+      PHP_UPLOAD_LIMIT: 16G
+      PHP_MEMORY_LIMIT: 1G
+      TZ: ${TZ}
+    volumes:
+      - ${DATA:?}/nextcloud/html:/var/www/html
+    depends_on:   # wait for the database to be ready, not just started
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+  db:
+    image: postgres:17-alpine
+    restart: "no"   # only runs when started with `homelab start`
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
+    volumes:
+      - ${DATA:?}/nextcloud/db:/var/lib/postgresql/data
+    healthcheck:   # app waits for this, so a slow crash-recovery start can't kill it
+      test: ["CMD-SHELL", "pg_isready -U nextcloud -d nextcloud"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+  redis:
+    image: valkey/valkey:8-alpine
+    restart: "no"   # only runs when started with `homelab start`

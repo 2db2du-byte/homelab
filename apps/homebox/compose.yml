@@ -1,0 +1,13 @@
+# Homebox: inventory of your stuff - where it is, receipts, warranties, serial numbers.
+name: homelab-homebox
+services:
+  homebox:
+    image: ghcr.io/sysadminsmedia/homebox:latest
+    restart: "no"   # only runs when started with `homelab start`
+    ports: ["3100:7745"]
+    environment:
+      HBOX_OPTIONS_ALLOW_REGISTRATION: ${HOMEBOX_SIGNUP:-false}
+      HBOX_AUTH_API_KEY_PEPPER: ${API_KEY_PEPPER:?}   # required since 2026; changing it cancels API keys
+      TZ: ${TZ}
+    volumes:
+      - ${DATA:?}/homebox:/data

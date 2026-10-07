@@ -1,0 +1,46 @@
+# Paperless-ngx: scan paper, then search every document by its text. From the official postgres compose.
+name: homelab-paperless
+services:
+  webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    restart: "no"   # only runs when started with `homelab start`
+    depends_on:   # wait for the database to be ready, not just started
+      db: {condition: service_healthy}
+      broker: {condition: service_started}
+    ports: ["8000:8000"]
+    environment:
+      PAPERLESS_REDIS: redis://broker:6379
+      PAPERLESS_DBHOST: db
+      PAPERLESS_DBENGINE: postgresql
+      PAPERLESS_DBPASS: ${DB_PASSWORD:?}
+      PAPERLESS_SECRET_KEY: ${SECRET_KEY:?}
+      PAPERLESS_URL: http://${HOST_IP:?}:8000
+      PAPERLESS_CSRF_TRUSTED_ORIGINS: http://${HOST_IP}:8000,http://localhost:8000
+      PAPERLESS_ADMIN_USER: ${APP_USER:?}
+      PAPERLESS_ADMIN_PASSWORD: ${APP_PASSWORD:?}
+      PAPERLESS_OCR_LANGUAGE: eng
+      PAPERLESS_TIME_ZONE: ${TZ}
+      USERMAP_UID: 1000
+      USERMAP_GID: 1000
+    volumes:
+      - ${DATA:?}/paperless/data:/usr/src/paperless/data
+      - ${DATA:?}/paperless/media:/usr/src/paperless/media
+      - ${DATA:?}/paperless/export:/usr/src/paperless/export
+      - ${DATA:?}/paperless/consume:/usr/src/paperless/consume   # drop scans here and they get filed
+  db:
+    image: docker.io/library/postgres:18
+    restart: "no"   # only runs when started with `homelab start`
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
+    volumes:
+      - ${DATA:?}/paperless/db:/var/lib/postgresql
+    healthcheck:   # app waits for this, so a slow crash-recovery start can't kill it
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+  broker:
+    image: docker.io/valkey/valkey:9-alpine
+    restart: "no"   # only runs when started with `homelab start`

@@ -1,0 +1,240 @@
+#!/bin/bash
+# homelab - start, stop and check the self-hosted apps in this folder.
+set -euo pipefail
+
+ROOT=$(dirname "$(readlink -f "$0")")
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/homelab/config"
+DATA=/mnt/homelab
+LOCAL_DATA="$HOME/.local/share/homelab"   # apps kept on the laptop's internal drive
+LOCAL_APPS=""                             # apps that don't need the USB drive (none right now)
+HOME_SSID=""
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+# app | port | what it is
+APPS="
+nextcloud|8080|files, calendar, contacts (your own Google Drive)
+immich|2283|photo & video backup (your own Google Photos)
+paperless|8000|scanned paperwork, searchable by text
+mealie|9000|recipes, meal plans, shopping lists
+homebox|3100|inventory of your stuff, warranties, receipts
+actual|5006|budgeting (open on this laptop: localhost:5006)
+linkwarden|3000|saved & archived web pages
+jellyfin|8096|family videos, like Netflix (videos are read-only)
+"
+
+bold=$'\e[1m' dim=$'\e[2m' red=$'\e[31m' green=$'\e[32m' yellow=$'\e[33m' reset=$'\e[0m'
+[ -t 1 ] || bold= dim= red= green= yellow= reset=
+
+die() { echo "${red}$*${reset}" >&2; exit 1; }
+app_names() { echo "$APPS" | awk -F'|' 'NF {print $1}'; }
+app_field() { echo "$APPS" | awk -F'|' -v a="$1" -v f="$2" '$1 == a {print $f}'; }
+host_ip() { ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="src") print $(i+1)}'; }
+current_ssid() { nmcli -t -f active,ssid dev wifi 2>/dev/null | awk -F: '$1=="yes" {sub(/^yes:/, ""); print; exit}'; }
+
+# Run docker directly, or through the docker group if this login predates joining it.
+docker_() {
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+  elif id -nG "$USER" | grep -qw docker; then
+    # Joined the group but haven't logged in again since; newgrp runs the command with it.
+    printf '%q ' docker "$@" | newgrp docker
+  else
+    die "Your account can't use Docker yet (not in the docker group)."
+  fi
+}
+compose() { local app=$1; shift; (cd "$ROOT/apps/$app" && docker_ compose "$@"); }
+
+check_app() { [ -n "$(app_field "$1" 2)" ] || die "Unknown app '$1'. Apps: $(app_names | tr '\n' ' ')"; }
+expand() { if [ "${1:-}" = all ]; then app_names; else printf '%s\n' "$@"; fi; }
+
+secret() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-32}"; }
+
+is_local() { [[ " $LOCAL_APPS " == *" $1 "* ]]; }
+on_drive() { [[ $DATA == /mnt/* ]]; }   # data on the USB drive (vs. the laptop's own disk)
+secrets_dir() { if is_local "$1"; then echo "$LOCAL_DATA/.secrets"; else echo "$DATA/.secrets"; fi; }
+
+# Secrets live next to each app's data so they travel with it.
+ensure_secrets() {
+  local app=$1 dir; dir=$(secrets_dir "$1"); local file="$dir/$1.env"
+  mkdir -p "$dir" && chmod 700 "$dir"
+  if [ ! -f "$file" ]; then
+    case $app in
+      nextcloud) printf 'DB_PASSWORD=%s\nADMIN_USER=admin\nADMIN_PASSWORD=%s\n' "$(secret)" "$(secret 20)" ;;
+      immich) printf 'DB_PASSWORD=%s\n' "$(secret)" ;;
+      homebox) printf 'API_KEY_PEPPER=%s\n' "$(secret 64)" ;;
+      paperless) printf 'DB_PASSWORD=%s\nSECRET_KEY=%s\n' "$(secret)" "$(secret 50)" ;;
+      linkwarden) printf 'POSTGRES_PASSWORD=%s\nNEXTAUTH_SECRET=%s\nMEILI_MASTER_KEY=%s\n' "$(secret)" "$(secret 48)" "$(secret 32)" ;;
+      *) : ;;
+    esac >"$file"
+    chmod 600 "$file"
+  fi
+}
+
+# Every start rewrites the app's .env: current settings + its saved secrets.
+write_env() {
+  local app=$1 env="$ROOT/apps/$1/.env"
+  {
+    echo "DATA=$DATA"
+    echo "TZ=$(timedatectl show -p Timezone --value 2>/dev/null || echo UTC)"
+    echo "HOST_IP=$(host_ip)"
+    echo "HOSTNAME=$(hostname)"
+    echo "RENDER_GID=$(getent group render | cut -d: -f3)"
+    echo "LOCAL_DATA=$LOCAL_DATA"
+    echo "HOME_DIR=$HOME"
+    cat "$(secrets_dir "$app")/$app.env"
+    [ -f "$DATA/.secrets/accounts.env" ] && cat "$DATA/.secrets/accounts.env"
+    if [ "$app" = immich ]; then
+      echo "UPLOAD_LOCATION=$DATA/immich/library"
+      echo "DB_DATA_LOCATION=$DATA/immich/postgres"
+      echo "IMMICH_VERSION=v3"
+      echo "DB_USERNAME=postgres"
+      echo "DB_DATABASE_NAME=immich"
+    fi
+  } >"$env"
+  chmod 600 "$env"
+}
+
+make_dirs() {
+  case $1 in
+    nextcloud) mkdir -p "$DATA/nextcloud" ;;
+    immich) mkdir -p "$DATA/immich/library" ;;
+    paperless) mkdir -p "$DATA/paperless"/{data,media,export,consume,db} ;;
+    mealie) mkdir -p "$DATA/mealie" ;;
+    homebox) mkdir -p "$DATA/homebox" ;;
+    actual) mkdir -p "$DATA/actual" ;;
+    linkwarden) mkdir -p "$DATA/linkwarden"/{data,db,meili} ;;
+  esac
+}
+
+# The drive is encrypted. At boot /etc/crypttab unlocks it; if it was plugged in later,
+# unlock it with the laptop's key file (needs your password once).
+unlock_drive() {
+  mountpoint -q "$DATA" && return
+  [ -e /dev/disk/by-label/homelab-crypt ] || return
+  echo "Unlocking the home lab drive..."
+  sudo systemctl start systemd-cryptsetup@homelab.service && sudo mount "$DATA"
+}
+
+preflight() {
+  local needs_drive=0
+  on_drive && for app in "$@"; do is_local "$app" || needs_drive=1; done
+  if [ "$needs_drive" = 1 ]; then
+    unlock_drive
+    mountpoint -q "$DATA" || die "The home lab drive isn't plugged in ($DATA is empty). Plug it in and try again."
+  fi
+  if [ -n "$HOME_SSID" ] && [ "${ANYWHERE:-}" != 1 ]; then
+    local ssid; ssid=$(current_ssid)
+    [ "$ssid" = "$HOME_SSID" ] || die "You're not on your home Wi-Fi (${ssid:-no Wi-Fi}). The servers only run at home,
+so strangers on other networks can't reach them. Override with: homelab start --anywhere ..."
+  fi
+}
+
+running() { [ -n "$(compose "$1" ps --status running -q 2>/dev/null)" ]; }
+
+cmd_start() {
+  local apps; apps=$(expand "$@")
+  [ -n "$apps" ] || die "Start what? e.g. homelab start nextcloud   (or: homelab start all)"
+  preflight $apps
+  for app in $apps; do
+    check_app "$app"
+    ensure_secrets "$app"; make_dirs "$app"; write_env "$app"
+    echo "${bold}starting $app${reset} ${dim}(first start downloads it - can take a while)${reset}"
+    compose "$app" up -d --quiet-pull 2>&1 | grep -v '^ *[✔⠿]' | grep -iv 'pulling\|pulled\|waiting\|downloading\|extracting\|verifying' || true
+    if [ "$app" = nextcloud ]; then
+      # Nextcloud refuses requests for addresses it doesn't know; keep it in sync with our current IP.
+      compose nextcloud exec -T -u www-data app php occ config:system:set trusted_domains 1 --value="$(host_ip)" >/dev/null 2>&1 || true
+    fi
+  done
+  cmd_status
+}
+
+cmd_stop() {
+  local apps; apps=$(expand "${@:-all}")
+  for app in $apps; do
+    check_app "$app"
+    running "$app" || continue
+    echo "stopping $app"
+    compose "$app" stop >/dev/null 2>&1
+  done
+}
+
+cmd_status() {
+  local ip; ip=$(host_ip)
+  on_drive && ! mountpoint -q "$DATA" && echo "${yellow}Home lab drive not plugged in.${reset}"
+  printf "${bold}%-15s %-9s %-28s %s${reset}\n" APP STATUS ADDRESS "WHAT IT IS"
+  for app in $(app_names); do
+    local port state
+    port=$(app_field "$app" 2)
+    if running "$app"; then state="${green}running${reset}  "; else state="${dim}stopped${reset}  "; fi
+    printf "%-15s %s%-28s %s\n" "$app" "$state" "http://${ip:-?}:$port" "$(app_field "$app" 3)"
+  done
+  echo "${dim}Open these from any device on your home Wi-Fi. On this laptop, localhost works too.${reset}"
+}
+
+cmd_logs() { check_app "${1:?which app?}"; compose "$1" logs --tail 100 -f; }
+
+cmd_update() {
+  local apps; apps=$(expand "${@:-all}")
+  for app in $apps; do
+    check_app "$app"
+    echo "${bold}updating $app${reset}"
+    ensure_secrets "$app"; write_env "$app"
+    compose "$app" pull -q
+    if running "$app"; then compose "$app" up -d >/dev/null 2>&1; fi
+  done
+  docker_ image prune -f >/dev/null
+  echo "done - running apps were restarted on the new version"
+}
+
+cmd_passwords() {
+  if [ -f "$DATA/.secrets/accounts.env" ]; then
+    . "$DATA/.secrets/accounts.env"
+    echo "One login for every app (Nextcloud, Paperless, Mealie, Homebox, Linkwarden, ...):"
+    echo "  user: $APP_USER   password: $APP_PASSWORD"
+    echo "  (Immich and Homebox ask for an email instead of a user name: $APP_EMAIL)"
+  fi
+  if [ -f "$DATA/.secrets/nextcloud.env" ]; then
+    . "$DATA/.secrets/nextcloud.env"
+    echo "Nextcloud admin (settings only): user: $ADMIN_USER   password: $ADMIN_PASSWORD"
+  fi
+}
+
+cmd_open() {
+  check_app "${1:?which app?}"
+  xdg-open "http://localhost:$(app_field "$1" 2)" >/dev/null 2>&1 &
+}
+
+cmd_help() {
+  cat <<EOF
+${bold}homelab${reset} - your self-hosted apps
+
+  homelab                   show what's running and where to open it
+  homelab start APP...      start apps (or: homelab start all)
+  homelab stop [APP...]     stop apps (no name = stop everything)
+  homelab open APP          open an app in the browser
+  homelab logs APP          watch an app's log (Ctrl-C to quit)
+  homelab update [APP...]   download new versions
+  homelab passwords         show preset logins
+
+Apps: $(app_names | tr '\n' ' ')
+Data lives on the home lab drive at $DATA. Servers only start on your home Wi-Fi.
+EOF
+}
+
+case "${1:-status}" in
+  --anywhere) ANYWHERE=1; shift; exec env ANYWHERE=1 "$0" "$@" ;;
+esac
+cmd=${1:-status}; shift || true
+[ "${1:-}" = --anywhere ] && { ANYWHERE=1; shift; }
+case $cmd in
+  start) cmd_start "$@" ;;
+  stop) cmd_stop "$@" ;;
+  restart) cmd_stop "$@"; cmd_start "$@" ;;
+  status|ls|list) cmd_status ;;
+  logs) cmd_logs "$@" ;;
+  update) cmd_update "$@" ;;
+  passwords|password) cmd_passwords ;;
+  open) cmd_open "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *) die "Unknown command '$cmd'. Try: homelab help" ;;
+esac
