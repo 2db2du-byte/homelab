@@ -13,7 +13,7 @@ services:
       TZ: ${TZ}
       JELLYFIN_PublishedServerUrl: http://${HOST_IP:?}:8096
     volumes:
-      - /run/media/${USER}/OmarchyExt1/apps/jellyfin/config:/config
-      - /run/media/${USER}/OmarchyExt1/apps/jellyfin/cache:/cache
+      - /mnt/storage/apps/jellyfin/config:/config
+      - /mnt/storage/apps/jellyfin/cache:/cache
       - ${HOME_DIR}/Videos:/media/videos:ro
     restart: "no"   # only runs when started with `homelab start`

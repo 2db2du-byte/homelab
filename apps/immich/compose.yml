@@ -26,8 +26,8 @@ services:
       - ${HOME_DIR}/Pictures:/mnt/pictures:ro
       - "${HOME_DIR}/Videos/Phone Videos:/mnt/phone-videos:ro"
       # Thumbnails and phone-friendly video copies live on the 4TB Seagate, not the laptop.
-      - /run/media/${USER}/OmarchyExt1/apps/immich/thumbs:/data/thumbs
-      - /run/media/${USER}/OmarchyExt1/apps/immich/encoded-video:/data/encoded-video
+      - /mnt/storage/apps/immich/thumbs:/data/thumbs
+      - /mnt/storage/apps/immich/encoded-video:/data/encoded-video
     env_file:
       - .env
     ports:
